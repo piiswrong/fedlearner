@@ -143,19 +143,36 @@ class WorkflowApi(Resource):
 
     def patch(self, workflow_id):
         parser = reqparse.RequestParser()
-        parser.add_argument('target_state', type=str, required=True,
+        parser.add_argument('target_state', type=str, required=False,
                             help='target_state is empty')
-        target_state = parser.parse_args()['target_state']
+        parser.add_argument('config', type=dict, required=False,
+                            help='updated config')
+        data = parser.parse_args()
 
         workflow = _get_workflow(workflow_id)
-        try:
-            workflow.update_target_state(WorkflowState[target_state])
+
+        target_state = data['target_state']
+        if target_state:
+            try:
+                workflow.update_target_state(WorkflowState[target_state])
+                db.session.commit()
+                logging.info('updated workflow %d target_state to %s',
+                            workflow.id, workflow.target_state)
+                scheduler.wakeup(workflow.id)
+            except ValueError as e:
+                raise InvalidArgumentException(details=str(e)) from e
+        
+        config = data['config']
+        if config:
+            db.session.refresh(workflow)
+            if workflow.target_state != WorkflowState.INVALID or \
+                    workflow.state not in \
+                    [WorkflowState.READY, WorkflowState.STOPPED]:
+                raise NoAccessException('Cannot edit running workflow')
+            config_proto = dict_to_workflow_definition(data['config'])
+            workflow.set_config(config_proto)
             db.session.commit()
-            logging.info('updated workflow %d target_state to %s',
-                         workflow.id, workflow.target_state)
-            scheduler.wakeup(workflow.id)
-        except ValueError as e:
-            raise InvalidArgumentException(details=str(e)) from e
+                
         return {'data': workflow.to_dict()}, HTTPStatus.OK
 
 
@@ -168,7 +185,28 @@ class PeerWorkflowsApi(Resource):
             client = RpcClient(project_config, party)
             resp = client.get_workflow(workflow.name)
             if resp.status.code != common_pb2.STATUS_SUCCESS:
-                raise InternalException()
+                raise InternalException(resp.status.msg)
+            peer_workflows[party.name] = MessageToDict(
+                resp,
+                preserving_proto_field_name=True,
+                including_default_value_fields=True)
+        return {'data': peer_workflows}, HTTPStatus.OK
+
+    def patch(self, workflow_id):
+        parser = reqparse.RequestParser()
+        parser.add_argument('config', type=str, required=True,
+                            help='target_state is empty')
+        config_proto = dict_to_workflow_definition(data['config'])
+
+        workflow = _get_workflow(workflow_id)
+        project_config = workflow.project.get_config()
+        peer_workflows = {}
+        for party in project_config.participants:
+            client = RpcClient(project_config, party)
+            resp = client.update_workflow(
+                workflow.name, config_proto)
+            if resp.status.code != common_pb2.STATUS_SUCCESS:
+                raise InternalException(resp.status.msg)
             peer_workflows[party.name] = MessageToDict(
                 resp,
                 preserving_proto_field_name=True,

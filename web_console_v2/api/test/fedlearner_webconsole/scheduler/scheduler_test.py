@@ -23,7 +23,7 @@ import logging
 import multiprocessing
 from http import HTTPStatus
 
-from testing.common import BaseTestCase
+from testing.common import BaseTestCase, TestAppProcess
 from fedlearner_webconsole.job.models import Job
 from fedlearner_webconsole.workflow.models import Workflow
 
@@ -48,21 +48,14 @@ class FollowerConfig(object):
 
 
 class WorkflowTest(BaseTestCase):
+    Config = LeaderConfig
+
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(self):
         os.environ['FEDLEARNER_WEBCONSOLE_POLLING_INTERVAL'] = '1'
 
-    @classmethod
-    def tearDownClass(cls):
-        del os.environ['FEDLEARNER_WEBCONSOLE_POLLING_INTERVAL']
-
-    def get_config(self):
-        if ROLE == 'leader':
-            return LeaderConfig
-        else:
-            return FollowerConfig
-
-    def test_workflow(self):
+    def setUp(self):
+        super(WorkflowTest, self).setUp()
         self._wf_template = {
             'group_alias': 'test-template',
             'job_definitions': [
@@ -88,10 +81,15 @@ class WorkflowTest(BaseTestCase):
                 }
             ]
         }
-        if ROLE == 'leader':
-            self.leader_test_workflow()
-        else:
-            self.follower_test_workflow()
+
+    def test_workflow(self):
+        proc = TestAppProcess(
+            WorkflowTest,
+            'follower_test_workflow',
+            FollowerConfig)
+        proc.start()
+        self.leader_test_workflow()
+        proc.join()
     
     def setup_project(self, role):
         if role == 'leader':
@@ -188,7 +186,7 @@ class WorkflowTest(BaseTestCase):
                 'config': self._wf_template,
             })
         self._check_workflow_state(1, 'READY', 'INVALID', 'READY')
-        self.assertEqual(len(Job.query.all()), 2)
+        self.assertEqual(len(Job.query.filter(Job.workflow_id == 1).all()), 2)
 
         # test fork
         json = self._check_workflow_state(2, 'READY', 'INVALID', 'READY')
@@ -212,19 +210,7 @@ class WorkflowTest(BaseTestCase):
                     resp.json['data']['transaction_state'] == transaction_state:
                 return resp.json
  
- 
-def test_main(role):
-    global ROLE
-    ROLE = role
-    unittest.main()
-
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
-
-    if ROLE == 'leader':
-        process = multiprocessing.Process(target=test_main, args=('follower',))
-        process.start()
-    test_main(ROLE)
-    if ROLE == 'leader':
-        assert process.join()
+    unittest.main()
